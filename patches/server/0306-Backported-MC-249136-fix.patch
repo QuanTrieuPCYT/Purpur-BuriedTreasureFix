@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: QuanTrieuPCYT <admin@qtpc.tech>
+Date: Wed, 10 Apr 2024 11:14:30 +0700
+Subject: [PATCH] Backported MC-249136 fix
+
+
+diff --git a/src/main/java/net/minecraft/world/level/StructureManager.java b/src/main/java/net/minecraft/world/level/StructureManager.java
+index b59581b92aed0bc1b09008c695b0b112c3e65743..fc945a43a64ca33438d40a3b3dbaf52d3039ce63 100644
+--- a/src/main/java/net/minecraft/world/level/StructureManager.java
++++ b/src/main/java/net/minecraft/world/level/StructureManager.java
+@@ -163,8 +163,8 @@ public class StructureManager {
+         return this.level.getChunk(sectionPos.x(), sectionPos.z(), ChunkStatus.STRUCTURE_REFERENCES).getAllReferences();
+     }
+ 
+-    public StructureCheckResult checkStructurePresence(ChunkPos chunkPos, Structure structure, boolean skipExistingChunk) {
+-        return this.structureCheck.checkStart(chunkPos, structure, skipExistingChunk);
++    public StructureCheckResult checkStructurePresence(ChunkPos chunkPos, Structure structure, net.minecraft.world.level.levelgen.structure.placement.StructurePlacement placement, boolean skipExistingChunk) {
++        return this.structureCheck.checkStart(chunkPos, structure, placement, skipExistingChunk);
+     }
+ 
+     public void addReference(StructureStart structureStart) {
+diff --git a/src/main/java/net/minecraft/world/level/chunk/ChunkGenerator.java b/src/main/java/net/minecraft/world/level/chunk/ChunkGenerator.java
+index b8b78494449c0cd638f9706a803dc54e184d981f..3a051393510d471b2c426165d9bac6aaf838d187 100644
+--- a/src/main/java/net/minecraft/world/level/chunk/ChunkGenerator.java
++++ b/src/main/java/net/minecraft/world/level/chunk/ChunkGenerator.java
+@@ -302,7 +302,7 @@ public abstract class ChunkGenerator {
+                         }
+ 
+                         holder = (Holder) iterator.next();
+-                        structurecheckresult = structureAccessor.checkStructurePresence(pos, (Structure) holder.value(), skipReferencedStructures);
++                        structurecheckresult = structureAccessor.checkStructurePresence(pos, (Structure) holder.value(), placement, skipReferencedStructures);
+                     } while (structurecheckresult == StructureCheckResult.START_NOT_PRESENT);
+ 
+                     if (!skipReferencedStructures && structurecheckresult == StructureCheckResult.START_PRESENT) {
+diff --git a/src/main/java/net/minecraft/world/level/levelgen/structure/StructureCheck.java b/src/main/java/net/minecraft/world/level/levelgen/structure/StructureCheck.java
+index 16356d7f388561300e794a52f3f263b8e7d9b880..7157b6bdfa2c73575ea4a0bb1d42477ecb6a6597 100644
+--- a/src/main/java/net/minecraft/world/level/levelgen/structure/StructureCheck.java
++++ b/src/main/java/net/minecraft/world/level/levelgen/structure/StructureCheck.java
+@@ -161,7 +161,7 @@ public class StructureCheck {
+         this.structureConfigs = registryManager.registryOrThrow(Registries.STRUCTURE);
+     }
+ 
+-    public StructureCheckResult checkStart(ChunkPos pos, Structure type, boolean skipReferencedStructures) {
++    public StructureCheckResult checkStart(ChunkPos pos, Structure type, net.minecraft.world.level.levelgen.structure.placement.StructurePlacement placement, boolean skipReferencedStructures) {
+         long l = pos.toLong();
+         Object2IntMap<Structure> object2IntMap = this.loadedChunksSafe.get(l); // Paper - rewrite chunk system - synchronise this class
+         if (object2IntMap != null) {
+@@ -171,6 +171,9 @@ public class StructureCheck {
+             if (structureCheckResult != null) {
+                 return structureCheckResult;
+             } else {
++                if (!placement.applyAdditionalChunkRestrictions(pos.x, pos.z, this.seed, null)) {
++                    return StructureCheckResult.START_NOT_PRESENT;
++                }
+                 boolean bl = this.featureChecksSafe.computeIfAbsent(type, (structure2) -> { // Paper - rewrite chunk system - synchronise this class
+                     return new SynchronisedLong2BooleanMap(PER_FEATURE_CHECK_LIMIT); // Paper - rewrite chunk system - synchronise this class
+                 }).getOrCompute(l, (chunkPos) -> { // Paper - rewrite chunk system - synchronise this class
+diff --git a/src/main/java/net/minecraft/world/level/levelgen/structure/placement/StructurePlacement.java b/src/main/java/net/minecraft/world/level/levelgen/structure/placement/StructurePlacement.java
+index 02e58161a0f5915084230831ee03050d762b67d2..2bd6218221a61cad411428849012909ccda33a70 100644
+--- a/src/main/java/net/minecraft/world/level/levelgen/structure/placement/StructurePlacement.java
++++ b/src/main/java/net/minecraft/world/level/levelgen/structure/placement/StructurePlacement.java
+@@ -74,13 +74,15 @@ public abstract class StructurePlacement {
+             }
+         }
+         // Paper end - Add missing structure set seed configs
+-        if (!this.isPlacementChunk(calculator, chunkX, chunkZ)) {
+-            return false;
+-        } else if (this.frequency < 1.0F && !this.frequencyReductionMethod.shouldGenerate(calculator.getLevelSeed(), this.salt, chunkX, chunkZ, this.frequency, saltOverride)) { // Paper - Add missing structure set seed configs
+-            return false;
+-        } else {
+-            return !this.exclusionZone.isPresent() || !this.exclusionZone.get().isPlacementForbidden(calculator, chunkX, chunkZ);
+-        }
++        return this.isPlacementChunk(calculator, chunkX, chunkZ) && this.applyAdditionalChunkRestrictions(chunkX, chunkZ, calculator.getLevelSeed(), saltOverride) && this.applyInteractionsWithOtherStructures(calculator, chunkX, chunkZ);
++    }
++
++    public boolean applyAdditionalChunkRestrictions(int chunkX, int chunkZ, long levelSeed, Integer saltOverride) {
++        return !(this.frequency < 1.0f) || this.frequencyReductionMethod.shouldGenerate(levelSeed, this.salt, chunkX, chunkZ, this.frequency, saltOverride); // Paper - Add missing structure set seed configs
++    }
++
++    public boolean applyInteractionsWithOtherStructures(ChunkGeneratorStructureState calculator, int chunkX, int chunkZ) {
++        return this.exclusionZone.isEmpty() || !this.exclusionZone.get().isPlacementForbidden(calculator, chunkX, chunkZ);
+     }
+ 
+     protected abstract boolean isPlacementChunk(ChunkGeneratorStructureState calculator, int chunkX, int chunkZ);
